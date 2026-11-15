@@ -1,6 +1,7 @@
 # Local CLI installations and generated connection files
 .tools/
 .local/
+k8s/secret.yaml
 .env
 .env.*
 !.env.example

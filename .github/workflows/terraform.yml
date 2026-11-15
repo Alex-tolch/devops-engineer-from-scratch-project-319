@@ -18,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: infrastructure
+    concurrency:
+      group: infrastructure-${{ github.repository }}
+      cancel-in-progress: false
     env:
       TF_INPUT: 'false'
       TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}

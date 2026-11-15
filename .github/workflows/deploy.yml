@@ -1,0 +1,150 @@
+name: Deploy to Kubernetes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: infrastructure
+    concurrency:
+      group: infrastructure-${{ github.repository }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      CLUSTER_NAME: bulletin-board-dev-k8s
+      APP_SECRET_NAME: bulletin-board-dev-app
+      DEPLOY_DIR: .local/deploy
+      KUBECONFIG: .local/deploy/kubeconfig
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: digitalocean/action-doctl@3cb3953159719656269e044e0e24ca16dd2a690f # v2.5.2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          version: '2.5.0'
+      - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+        with:
+          version: 'v1.36.6'
+
+      - name: Temporarily allow runner to access Kubernetes API
+        run: |
+          umask 077
+          mkdir -p "$DEPLOY_DIR"
+          doctl kubernetes cluster get "$CLUSTER_NAME" --output json \
+            | jq 'if type == "array" then .[0] else . end' > "$DEPLOY_DIR/cluster.json"
+          if ! jq -e '.control_plane_firewall.enabled == true' "$DEPLOY_DIR/cluster.json" > /dev/null; then
+            echo '::error::Enable the Kubernetes API firewall through Terraform before deploying.'
+            exit 1
+          fi
+          cluster_id="$(jq -r '.id' "$DEPLOY_DIR/cluster.json")"
+          runner_ip="$(curl --ipv4 --fail --silent --show-error --retry 3 --max-time 10 https://api.ipify.org)"
+          python3 -c 'import ipaddress, sys; ipaddress.IPv4Address(sys.argv[1])' "$runner_ip"
+          printf '%s/32' "$runner_ip" > "$DEPLOY_DIR/runner-cidr"
+          cidr="$(cat "$DEPLOY_DIR/runner-cidr")"
+          if ! jq -e --arg cidr "$cidr" '.control_plane_firewall.allowed_addresses | index($cidr) != null' "$DEPLOY_DIR/cluster.json" > /dev/null; then
+            addresses="$(jq -r --arg cidr "$cidr" '(.control_plane_firewall.allowed_addresses + [$cidr]) | join(",")' "$DEPLOY_DIR/cluster.json")"
+            # Record ownership before the API call: a timeout may follow a successful update.
+            touch "$DEPLOY_DIR/firewall-added"
+            doctl kubernetes cluster update "$cluster_id" --update-kubeconfig=false \
+              --enable-control-plane-firewall=true \
+              --control-plane-firewall-allowed-addresses="$addresses" > /dev/null
+          fi
+
+      - name: Configure kubeconfig
+        run: |
+          doctl kubernetes cluster kubeconfig save "$CLUSTER_NAME" --expiry-seconds 1800
+          for _ in {1..12}; do
+            if kubectl get namespace default --request-timeout=5s > /dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl get nodes --request-timeout=10s
+
+      - name: Prepare manifests from Secrets Manager
+        run: |
+          umask 077
+          doctl secrets get "$APP_SECRET_NAME" --region fra1 --show --output json > "$DEPLOY_DIR/settings.json"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          os.umask(0o077)
+          directory = pathlib.Path(os.environ["DEPLOY_DIR"])
+          values = json.loads((directory / "settings.json").read_text())["values"]
+
+          def manifest(filename):
+              command = ["kubectl", "create", "--dry-run=client", "--validate=false",
+                         "-f", "k8s/" + filename, "-o", "json"]
+              return json.loads(subprocess.check_output(command))
+
+          config = manifest("configmap.yaml")
+          secret = manifest("secret.yaml.example")
+          config_keys = ["SPRING_PROFILES_ACTIVE", "SPRING_DATASOURCE_URL",
+                         "STORAGE_S3_BUCKET", "STORAGE_S3_REGION", "STORAGE_S3_ENDPOINT"]
+          required = config_keys + list(secret["stringData"])
+          missing = [key for key in required
+                     if not isinstance(values.get(key), str) or not values[key].strip()]
+          if missing:
+              raise SystemExit("Missing application settings: " + ", ".join(missing))
+          for key in config_keys:
+              config["data"][key] = values[key]
+          for key in secret["stringData"]:
+              secret["stringData"][key] = values[key]
+
+          deployment = manifest("deployment.yaml")
+          checksum = hashlib.sha256(json.dumps(
+              [config["data"], secret["stringData"]], sort_keys=True
+          ).encode()).hexdigest()
+          deployment["spec"]["template"]["metadata"].setdefault(
+              "annotations", {}
+          )["checksum/config"] = checksum
+          for name, resource in [("configmap", config), ("secret", secret), ("deployment", deployment)]:
+              (directory / (name + ".json")).write_text(json.dumps(resource))
+          PY
+
+      - name: Apply manifests and wait for Ready
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f "$DEPLOY_DIR/configmap.json" -f "$DEPLOY_DIR/secret.json"
+          kubectl apply -f "$DEPLOY_DIR/deployment.json" -f k8s/service.yaml
+          kubectl -n bulletin-board rollout status deployment/bulletin-board --timeout=300s
+          make k8s-status
+
+      - name: Check service responses
+        run: |
+          kubectl -n bulletin-board port-forward service/bulletin-board 8080:80 > "$DEPLOY_DIR/port-forward.log" 2>&1 &
+          forward_pid=$!
+          trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
+          curl --fail --silent --show-error --retry 15 --retry-delay 2 --retry-connrefused \
+            http://127.0.0.1:8080/ --output /dev/null
+          curl --fail --silent --show-error http://127.0.0.1:8080/api/bulletins --output /dev/null
+
+      - name: Remove temporary API access and credentials
+        if: always()
+        run: |
+          trap 'rm -rf -- "$DEPLOY_DIR"' EXIT
+          if test -f "$DEPLOY_DIR/firewall-added"; then
+            cluster_id="$(jq -r '.id' "$DEPLOY_DIR/cluster.json")"
+            cidr="$(cat "$DEPLOY_DIR/runner-cidr")"
+            doctl kubernetes cluster get "$cluster_id" --output json \
+              | jq 'if type == "array" then .[0] else . end' > "$DEPLOY_DIR/current-cluster.json"
+            addresses="$(jq -r --arg cidr "$cidr" '.control_plane_firewall.allowed_addresses | map(select(. != $cidr)) | join(",")' "$DEPLOY_DIR/current-cluster.json")"
+            enabled="$(jq -r '.control_plane_firewall.enabled' "$DEPLOY_DIR/current-cluster.json")"
+            doctl kubernetes cluster update "$cluster_id" --update-kubeconfig=false \
+              --enable-control-plane-firewall="$enabled" \
+              --control-plane-firewall-allowed-addresses="$addresses" > /dev/null
+          fi

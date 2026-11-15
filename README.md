@@ -259,6 +259,103 @@ JDBC использует приватный адрес и `sslmode=verify-full`
 State и планы содержат секреты даже с `sensitive = true`; они, `.env` и локальные
 параметры исключены через `.gitignore`. Оба `.terraform.lock.hcl` храните в Git.
 
+## Первичный деплой в Kubernetes
+
+Манифесты находятся в [k8s/](./k8s): namespace `bulletin-board`, ConfigMap,
+Secret, Deployment и внутренний Service `ClusterIP`.
+Нужны созданная инфраструктура из предыдущего шага, доступный kubeconfig
+и kubectl совместимой с кластером версии (для Kubernetes 1.36 — kubectl 1.36).
+Перед применением проверьте выбранный кластер:
+
+```bash
+kubectl config current-context
+kubectl get nodes
+```
+
+Заполните `SPRING_DATASOURCE_URL` и `STORAGE_S3_BUCKET` в `k8s/configmap.yaml`
+значениями из Terraform outputs `postgres_connection.jdbc_url` и `s3_access.bucket`.
+Остальные параметры ConfigMap соответствуют региону `fra1` и профилю `prod`.
+Скопируйте шаблон Secret:
+
+```bash
+cp k8s/secret.yaml.example k8s/secret.yaml
+```
+
+В `k8s/secret.yaml` укажите пользователя и пароль PostgreSQL, ключи **бакета
+приложения** и PEM-сертификат CA из Secrets Manager, созданного Terraform.
+Например, значение отдельного параметра можно получить так:
+
+```bash
+doctl secrets get bulletin-board-dev-app --region fra1 --key POSTGRES_CA_CERT --raw
+```
+
+Имя секрета определяется output `app_secret_id` (`регион/имя`). Получайте остальные
+значения через `--key` с именами из шаблона. Настоящий `k8s/secret.yaml` исключён
+из Git; в репозитории хранится только пример. CA монтируется в `/etc/postgresql/ca.crt`.
+
+Применение и проверка Ready:
+
+```bash
+make k8s-apply
+make k8s-status
+```
+
+Команды используют `kubectl apply` и ждут завершения rollout. Эквивалент без Make:
+
+```bash
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/configmap.yaml -f k8s/secret.yaml
+kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
+kubectl -n bulletin-board rollout status deployment/bulletin-board --timeout=300s
+kubectl -n bulletin-board get pods
+```
+
+Ожидаемый результат: одна реплика Deployment доступна, pod имеет `READY 1/1`.
+В отдельном терминале запустите временный доступ:
+
+```bash
+make k8s-port-forward
+```
+
+Откройте <http://localhost:8080/> и во втором терминале выполните `make k8s-check`.
+Проверка запрашивает UI и `/api/bulletins`; оба запроса должны вернуть HTTP 200.
+В PowerShell без Make используйте `curl.exe --fail http://localhost:8080/api/bulletins`.
+
+Deployment использует опубликованный образ с тегом `sha-<коммит>`, одну реплику,
+RollingUpdate с `maxUnavailable: 0`, `maxSurge: 1` и CPU/RAM requests/limits.
+Startup probe даёт Spring Boot время запуститься; readiness учитывает доступность
+PostgreSQL, liveness проверяет приложение. Probes обращаются к Actuator на порту
+9090; Service направляет только трафик приложения на 8080.
+При обновлении задайте новый опубликованный тег образа в `k8s/deployment.yaml`
+и выполните `make k8s-apply`. После изменения ConfigMap или Secret для существующих
+pod примените манифесты и выполните:
+
+```bash
+kubectl -n bulletin-board rollout restart deployment/bulletin-board
+kubectl -n bulletin-board rollout status deployment/bulletin-board --timeout=300s
+```
+
+### Ручной деплой через GitHub Actions
+
+После создания инфраструктуры откройте **Actions → Deploy to Kubernetes →
+Run workflow**, выберите ветку `main` и запустите workflow.
+Используется существующий Secret `DIGITALOCEAN_TOKEN` из Environment
+`infrastructure`; новые GitHub Secrets для приложения не нужны.
+
+[Workflow](./.github/workflows/deploy.yml) получает kubeconfig кластера
+`bulletin-board-dev-k8s`, читает параметры из Secrets Manager
+`bulletin-board-dev-app` в `fra1` и подставляет их в ConfigMap и Secret.
+В CI вручную заполнять `k8s/configmap.yaml` и `k8s/secret.yaml` не требуется.
+Для деплоя используется образ из `k8s/deployment.yaml`.
+Изменение конфигурации или секретов обновляет checksum в pod template
+и запускает RollingUpdate. Workflow ждёт Ready и проверяет UI/API через
+временный `port-forward`.
+
+На время задания IP runner добавляется в список доступа Kubernetes API,
+а завершающий шаг удаляет только добавленное правило и временные credentials.
+Terraform и деплой используют общую очередь, чтобы не менять инфраструктуру
+одновременно. Кластер и остальные ресурсы создаются на предыдущем шаге.
+
 ---
 
 <details>

@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bulletin-board
+  namespace: bulletin-board
+spec:
+  replicas: 1
+  minReadySeconds: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: bulletin-board
+  template:
+    metadata:
+      labels:
+        app: bulletin-board
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: app
+          image: ghcr.io/alex-tolch/project-devops-deploy:sha-79d6769d305ee38d2261135a360060b6f4ba9ea3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: bulletin-board-config
+            - secretRef:
+                name: bulletin-board-secret
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 2
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          volumeMounts:
+            - name: postgres-ca
+              mountPath: /etc/postgresql
+              readOnly: true
+      volumes:
+        - name: postgres-ca
+          secret:
+            secretName: bulletin-board-secret
+            items:
+              - key: POSTGRES_CA_CERT
+                path: ca.crt
