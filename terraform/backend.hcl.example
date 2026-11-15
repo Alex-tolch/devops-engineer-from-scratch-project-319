@@ -1,0 +1,17 @@
+# Prefer generating this file from bootstrap: make tf-backend-config.
+# Credentials belong in AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, not here.
+bucket = "alex-tolch-terraform-state"
+key    = "bulletin-board/dev/terraform.tfstate"
+region = "us-east-1"
+
+endpoints = {
+  s3 = "https://fra1.digitaloceanspaces.com"
+}
+
+skip_credentials_validation = true
+skip_requesting_account_id  = true
+skip_metadata_api_check     = true
+skip_region_validation      = true
+skip_s3_checksum            = true
+use_lockfile                = true
+

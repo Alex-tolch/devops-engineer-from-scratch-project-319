@@ -1,0 +1,26 @@
+# Local CLI installations and generated connection files
+.tools/
+.local/
+.env
+.env.*
+!.env.example
+
+# Terraform state, plans, credentials and downloaded providers
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+terraform/backend.hcl
+terraform/*.tfbackend
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

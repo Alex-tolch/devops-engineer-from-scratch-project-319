@@ -1,0 +1,51 @@
+name: Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Terraform operation (create the state bucket with bootstrap first)
+        type: choice
+        options: [plan, apply]
+        default: plan
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: infrastructure
+    env:
+      TF_INPUT: 'false'
+      TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      SPACES_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      SPACES_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+      TF_VAR_app_bucket_name: ${{ vars.APP_BUCKET_NAME }}
+      TF_VAR_api_server_allowed_cidrs: ${{ vars.KUBERNETES_API_ALLOWED_CIDRS }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.17.2
+          terraform_wrapper: false
+      - name: Initialize Spaces backend
+        run: |
+          terraform -chdir=terraform init -lockfile=readonly \
+            -backend-config=backend.hcl.example \
+            -backend-config="bucket=$TF_STATE_BUCKET"
+      - name: Plan
+        run: terraform -chdir=terraform plan -lock-timeout=5m -out=tfplan
+      - name: Apply saved plan
+        if: inputs.operation == 'apply'
+        run: terraform -chdir=terraform apply -lock-timeout=5m tfplan
+      - name: Outputs
+        if: inputs.operation == 'apply'
+        run: terraform -chdir=terraform output

@@ -1,0 +1,17 @@
+project_name = "bulletin-board"
+environment  = "dev"
+region       = "fra1"
+
+# Your public workstation/VPN IPv4 address, followed by /32.
+api_server_allowed_cidrs = ["203.0.113.10/32"]
+
+# Choose a globally unique application bucket name.
+app_bucket_name = "alex-tolch-bulletins-dev"
+
+vpc_cidr           = "10.20.0.0/16"
+kubernetes_version = "1.36."
+node_count         = 1
+node_size          = "s-2vcpu-4gb"
+postgres_version   = "17"
+postgres_size      = "db-s-1vcpu-1gb"
+postgres_database  = "bulletins"

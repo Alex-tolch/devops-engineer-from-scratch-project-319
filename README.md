@@ -12,6 +12,7 @@
 - Docker: сборка и запуск Spring Boot + React в одном контейнере.
 - GitHub Container Registry (GHCR): хранение образов.
 - GitHub Actions: сборка, проверка контейнера и публикация в GHCR.
+- Terraform и DigitalOcean: VPC/NAT, DOKS, Managed PostgreSQL, Spaces и Secrets Manager.
 
 ## Установка
 
@@ -159,6 +160,104 @@ Workflow использует автоматически выданный `GITHU
 с тегом `0.1.0` вместо `local`.
 
 Справка: [аутентификация, push и видимость пакетов GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
+## Инфраструктура DigitalOcean
+
+Конфигурация находится в [terraform/](./terraform), команды — в [Makefile](./Makefile).
+Создаются VPC/NAT, DOKS с одной нодой, Managed PostgreSQL, Spaces-бакет приложения
+и Secrets Manager. Регион — `fra1`, worker — `s-2vcpu-4gb`, PostgreSQL — 17.
+Ноды используют приватную сеть и NAT; база разрешает подключения только кластеру.
+S3-ключ приложения ограничен его бакетом. State хранится в отдельном Spaces-бакете.
+
+### Требования и аутентификация
+
+Нужны аккаунт DigitalOcean с биллингом, Bash и GNU Make (Windows: WSL), Git,
+[Terraform >= 1.11](https://developer.hashicorp.com/terraform/install),
+[doctl](https://docs.digitalocean.com/reference/doctl/how-to/install/) и
+[kubectl](https://kubernetes.io/docs/tasks/tools/).
+
+```bash
+doctl auth init --context hexlet
+doctl auth switch --context hexlet
+doctl account get
+cp .env.example .env
+```
+
+При `auth init` введите DigitalOcean API token. В `.env` локально заполните
+`DIGITALOCEAN_TOKEN`, `SPACES_ACCESS_KEY_ID` и `SPACES_SECRET_ACCESS_KEY`.
+Для создания бакетов Spaces-ключу нужен Full access. Загрузите переменные:
+
+```bash
+set -a
+source .env
+set +a
+```
+
+Перед первым `apply` включите [Secrets Manager preview](https://docs.digitalocean.com/products/secrets-manager/overview/)
+в панели DigitalOcean. Это аналог Lockbox; пока он управляется через официальный
+API провайдером `magodo/restful`, так как в DigitalOcean provider нет его ресурса.
+
+### Backend и создание инфраструктуры
+
+Бакет состояния должен существовать до `init` основного проекта. Для его создания
+используется [terraform/bootstrap/](./terraform/bootstrap) с локальным state:
+
+```bash
+cp terraform/bootstrap/terraform.tfvars.example terraform/bootstrap/terraform.tfvars
+```
+
+Задайте уникальное `state_bucket_name`, затем выполните:
+
+```bash
+make tf-bootstrap-init
+make tf-bootstrap-plan
+make tf-bootstrap-apply
+make tf-backend-config
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+```
+
+В основном `terraform.tfvars` задайте уникальное `app_bucket_name` и свой публичный
+IP с маской `/32` в `api_server_allowed_cidrs` — для доступа через `kubectl`.
+Размер и количество worker и параметры PostgreSQL также задаются в этом файле.
+
+```bash
+make tf-init
+make tf-plan
+make tf-apply
+make tf-kubeconfig
+export KUBECONFIG="$PWD/.local/kubeconfig.yaml"
+kubectl get nodes
+```
+
+`apply` применяет сохранённый план; bootstrap-state сохраните в защищённом месте.
+После истечения kubeconfig получите свежий через
+`doctl kubernetes cluster kubeconfig save <cluster_id>`.
+
+### Ручной запуск через GitHub Actions
+
+После bootstrap в **Settings → Environments → infrastructure** добавьте Secrets
+`DIGITALOCEAN_TOKEN`, `SPACES_ACCESS_KEY_ID`, `SPACES_SECRET_ACCESS_KEY` и Variables:
+
+| Variable | Значение |
+| --- | --- |
+| `TF_STATE_BUCKET` | Имя созданного бакета состояния |
+| `APP_BUCKET_NAME` | Уникальное имя бакета приложения |
+| `KUBERNETES_API_ALLOWED_CIDRS` | JSON-массив своего публичного IP, например `["203.0.113.10/32"]` |
+
+В **Actions → Terraform → Run workflow** выберите `main` и `plan` либо `apply`.
+Workflow запускается вручную и использует те же credentials и backend.
+
+### Outputs и подключение приложения
+
+Outputs включают `cluster_id`, `node_pool_id`, чувствительные `kubeconfig`,
+`kubernetes_token`, `postgres_connection`, `s3_access` и идентификатор
+секрета `app_secret_id` в формате `регион/имя` — аналог ID Lockbox.
+Просмотр: `make tf-output`; отдельные параметры БД: `terraform -chdir=terraform output -json postgres_connection`.
+JDBC использует приватный адрес и `sslmode=verify-full`; CA из секрета
+`POSTGRES_CA_CERT` нужно смонтировать в `/etc/postgresql/ca.crt` при развёртывании приложения.
+Для выделенной учебной БД используется `doadmin`, чтобы Hibernate мог создать схему.
+State и планы содержат секреты даже с `sensitive = true`; они, `.env` и локальные
+параметры исключены через `.gitignore`. Оба `.terraform.lock.hcl` храните в Git.
 
 ---
 
