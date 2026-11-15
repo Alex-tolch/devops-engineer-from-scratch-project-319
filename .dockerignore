@@ -1,0 +1,2 @@
+# Application sources are fetched inside Docker; local files are not needed.
+**
