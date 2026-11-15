@@ -11,6 +11,7 @@
 
 - Docker: сборка и запуск Spring Boot + React в одном контейнере.
 - GitHub Container Registry (GHCR): хранение образов.
+- GitHub Actions: сборка, проверка контейнера и публикация в GHCR.
 
 ## Установка
 
@@ -82,6 +83,33 @@ docker rm bulletin-board
 ### Публикация в GitHub Container Registry
 
 Адрес образа: `ghcr.io/alex-tolch/project-devops-deploy`.
+
+#### Автоматическая публикация через GitHub Actions
+
+[Workflow](./.github/workflows/docker.yml) собирает образ из Dockerfile
+этого репозитория, запускает контейнер и проверяет UI, API и readiness.
+Публикация выполняется только после успешной проверки того же образа:
+
+- Pull request в `main`: сборка и проверка.
+- Push в `main`: публикация тегов `latest` и `sha-<полный SHA коммита>`.
+- Push тега `v0.1.0`: публикация тегов `0.1.0` и `sha-<полный SHA коммита>`.
+- Ручной запуск через Actions → Build and publish Docker image → Run workflow:
+  сборка и проверка; для `main` также публикация `latest` и тега с SHA.
+
+SHA в теге образа относится к коммиту текущего инфраструктурного репозитория.
+Версия исходников приложения зафиксирована через `APP_REV` в Dockerfile.
+Чтобы обновить приложение в CI, измените этот SHA и отправьте коммит.
+Push в отдельный форк приложения сам по себе этот workflow не запускает.
+
+Workflow использует автоматически выданный `GITHUB_TOKEN` с правом
+`packages: write`: отдельный PAT и дополнительные секреты для CI не нужны.
+Если пакет ранее создан вручную, предоставьте текущему репозиторию доступ
+на запись в настройках пакета → Manage Actions access.
+Видимость пакета настраивается отдельно, как описано ниже.
+Подробнее: [публикация образов через GitHub Actions](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images).
+
+#### Ручная публикация
+
 Публикуйте тот же образ, который проверили локально.
 
 1. Создайте [personal access token (classic)](https://github.com/settings/tokens/new?scopes=write:packages)

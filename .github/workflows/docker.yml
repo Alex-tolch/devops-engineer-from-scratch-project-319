@@ -1,0 +1,69 @@
+name: Build and publish Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_NAME: ghcr.io/alex-tolch/project-devops-deploy
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build --tag "$IMAGE_NAME:sha-$GITHUB_SHA" .
+
+      - name: Check application
+        run: |
+          docker run -d --name bulletin-board-ci \
+            -p 127.0.0.1:18080:8080 -p 127.0.0.1:19090:9090 \
+            -e SPRING_PROFILES_ACTIVE=dev "$IMAGE_NAME:sha-$GITHUB_SHA"
+          trap 'docker logs --tail 50 bulletin-board-ci; docker rm -f bulletin-board-ci' EXIT
+
+          curl --fail --silent --show-error --retry 30 --retry-delay 2 --retry-all-errors \
+            http://127.0.0.1:19090/actuator/health/readiness \
+            | grep -q '"status":"UP"'
+          curl --fail --silent --show-error http://127.0.0.1:18080/ \
+            --output "$RUNNER_TEMP/bulletin-index.html"
+          grep -q '/assets/index-' "$RUNNER_TEMP/bulletin-index.html"
+          curl --fail --silent --show-error http://127.0.0.1:18080/api/bulletins \
+            --output /dev/null
+
+      - name: Publish tested image to GHCR
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          docker push "$IMAGE_NAME:sha-$GITHUB_SHA"
+
+          if [[ "$GITHUB_REF" == 'refs/heads/main' ]]; then
+            docker tag "$IMAGE_NAME:sha-$GITHUB_SHA" "$IMAGE_NAME:latest"
+            docker push "$IMAGE_NAME:latest"
+          elif [[ "$GITHUB_REF_TYPE" == 'tag' ]]; then
+            docker tag "$IMAGE_NAME:sha-$GITHUB_SHA" "$IMAGE_NAME:${GITHUB_REF_NAME#v}"
+            docker push "$IMAGE_NAME:${GITHUB_REF_NAME#v}"
+          fi
